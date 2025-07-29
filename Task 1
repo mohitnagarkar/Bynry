@@ -1,0 +1,77 @@
+Issues Identified:
+
+
+Issue                                         Type                             Explanation                                                                                          
+ 
+   No input validation                         Technical & Business     The code assumes data contains all required fields. If a field is missing, it'll raise a KeyError. 
+   No SKU uniqueness check                     Business                 SKUs must be unique platform-wide, but the code doesn't enforce that.                                
+   Product created before validation           Technical                The product is added before checking for SKU conflicts or inventory logic.                           
+   Missing transaction atomicity               Technical                Two separate db.session.commit() calls can lead to partial writes if something fails in between.   
+   No error handling                           Technical                There's no try-except, so an exception will crash the endpoint.                                    
+   Decimal precision not guaranteed            Technical                price=data['price'] might store price as a float instead of a Decimal.                           
+   Multiple warehouse support not considered   Business                 Code implies product exists only in one warehouse, contradicting the requirement.                    
+   Missing HTTP status codes                   Technical                Always returns success (`200`) even in failure.                                                      
+   Optional fields not handled                 Technical                If any optional fields are missing, the code may raise errors.    
+
+Impact of these issues:
+
+ App crashes on missing fields or invalid data.
+
+ Data inconsistency if Product is committed but Inventory fails.
+
+ Duplicate SKUs corrupt inventory tracking & ordering.
+
+ Bad pricing data due to float rounding.
+
+ User confusion due to incorrect success responses or silent failures.
+
+ Partial database state if one commit works and the other fails.
+
+
+Corrected Version with Comments:
+
+from flask import request, jsonify
+from app import app, db
+from models import Product, Inventory
+from decimal import Decimal
+
+@app.route('/api/products', methods=['POST'])
+def create_product():
+    data = request.get_json()
+
+    # Required fields check
+    try:
+        name = data['name']
+        sku = data['sku']
+        price = Decimal(str(data['price']))
+        warehouse_id = data['warehouse_id']
+        initial_quantity = int(data['initial_quantity'])
+    except (KeyError, ValueError, TypeError):
+        return jsonify({"error": "Invalid or missing fields"}), 400
+
+    # Check for duplicate SKU
+    if Product.query.filter_by(sku=sku).first():
+        return jsonify({"error": "SKU already exists"}), 409
+
+    try:
+        # Create product and inventory in one transaction
+        product = Product(name=name, sku=sku, price=price)
+        db.session.add(product)
+        db.session.flush()  # Ensure product.id is generated
+
+        inventory = Inventory(
+            product_id=product.id,
+            warehouse_id=warehouse_id,
+            quantity=initial_quantity
+        )
+        db.session.add(inventory)
+
+        db.session.commit()
+        return jsonify({"message": "Product created", "product_id": product.id}), 201
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to create product", "details": str(e)}), 500
+
+
+
